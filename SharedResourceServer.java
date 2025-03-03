@@ -1,26 +1,28 @@
+import java.util.concurrent.Semaphore;
 import java.io.*;
 import java.net.*;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class SharedResourceServer {
-    private static String data = "Initial Data";
-    private static final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+    private static String sharedResource = "Initial Data";
+    private static Semaphore readSemaphore = new Semaphore(1); // Для контроля чтения
+    private static Semaphore writeSemaphore = new Semaphore(1); // Для контроля записи
+    private static int readersCount = 0;
 
     public static void main(String[] args) {
         try (ServerSocket serverSocket = new ServerSocket(5000)) {
-            System.out.println("Сервер запущен на порту 5000...");
-
+            System.out.println("Server started on port 5000...");
             while (true) {
                 Socket clientSocket = serverSocket.accept();
-                new ClientHandler(clientSocket).start();
+                new Thread(new ClientHandler(clientSocket)).start();
             }
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    private static class ClientHandler extends Thread {
-        private final Socket clientSocket;
+    // Обработчик запросов от клиента
+    static class ClientHandler implements Runnable {
+        private Socket clientSocket;
 
         public ClientHandler(Socket socket) {
             this.clientSocket = socket;
@@ -28,32 +30,49 @@ public class SharedResourceServer {
 
         @Override
         public void run() {
-            try (
-                    BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-                    PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true)
-            ) {
+            try (BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+                 PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true)) {
+
                 String request = in.readLine();
-
-                if (request.equals("READ")) {
-                    lock.readLock().lock();
-                    try {
-                        out.println(data);
-                        System.out.println("Читатель получил данные: " + data);
-                    } finally {
-                        lock.readLock().unlock();
-                    }
-                } else if (request.startsWith("WRITE:")) {
-                    lock.writeLock().lock();
-                    try {
-                        data = request.substring(6);
-                        out.println("OK");
-                        System.out.println("Писатель изменил данные: " + data);
-                    } finally {
-                        lock.writeLock().unlock();
-                    }
+                if (request.startsWith("READ")) {
+                    handleRead(out);
+                } else if (request.startsWith("WRITE")) {
+                    handleWrite(request.substring(6), out);
                 }
-
             } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+        private void handleRead(PrintWriter out) throws IOException {
+            try {
+                readSemaphore.acquire();
+                readersCount++;
+                if (readersCount == 1) {
+                    writeSemaphore.acquire();  // Блокируем писателей, если это первый читатель
+                }
+                readSemaphore.release();
+
+                out.println(sharedResource);
+
+                readSemaphore.acquire();
+                readersCount--;
+                if (readersCount == 0) {
+                    writeSemaphore.release();  // Разблокируем писателей, если это последний читатель
+                }
+                readSemaphore.release();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+
+        private void handleWrite(String data, PrintWriter out) {
+            try {
+                writeSemaphore.acquire();
+                sharedResource = data;
+                out.println("OK");
+                writeSemaphore.release();
+            } catch (InterruptedException e) {
                 e.printStackTrace();
             }
         }
